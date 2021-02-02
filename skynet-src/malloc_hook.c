@@ -15,8 +15,8 @@
 #define MEMORY_ALLOCTAG 0x20140605
 #define MEMORY_FREETAG 0x0badf00d
 
-static size_t _used_memory = 0;
-static size_t _memory_block = 0;
+static ATOM_SIZET _used_memory = 0;
+static ATOM_SIZET _memory_block = 0;
 
 struct mem_data {
 	uint32_t handle;
@@ -65,23 +65,23 @@ get_allocated_field(uint32_t handle) {
 	return &data->allocated;
 }
 
-inline static void 
+inline static void
 update_xmalloc_stat_alloc(uint32_t handle, size_t __n) {
-	ATOM_ADD(&_used_memory, __n);
-	ATOM_INC(&_memory_block); 
+	ATOM_FADD(&_used_memory, __n);
+	ATOM_FINC(&_memory_block);
 	ssize_t* allocated = get_allocated_field(handle);
 	if(allocated) {
-		ATOM_ADD(allocated, __n);
+		ATOM_FADD(allocated, __n);
 	}
 }
 
 inline static void
 update_xmalloc_stat_free(uint32_t handle, size_t __n) {
-	ATOM_SUB(&_used_memory, __n);
-	ATOM_DEC(&_memory_block);
+	ATOM_FSUB(&_used_memory, __n);
+	ATOM_FDEC(&_memory_block);
 	ssize_t* allocated = get_allocated_field(handle);
 	if(allocated) {
-		ATOM_SUB(allocated, __n);
+		ATOM_FSUB(allocated, __n);
 	}
 }
 
@@ -126,12 +126,29 @@ static void malloc_oom(size_t size) {
 	abort();
 }
 
-void 
-memory_info_dump(void) {
-	je_malloc_stats_print(0,0,0);
+void
+memory_info_dump(const char* opts) {
+	je_malloc_stats_print(0,0, opts);
 }
 
-size_t 
+bool
+mallctl_bool(const char* name, bool* newval) {
+	bool v = 0;
+	size_t len = sizeof(v);
+	if(newval) {
+		je_mallctl(name, &v, &len, newval, sizeof(bool));
+	} else {
+		je_mallctl(name, &v, &len, NULL, 0);
+	}
+	return v;
+}
+
+int
+mallctl_cmd(const char* name) {
+	return je_mallctl(name, NULL, NULL, NULL, 0);
+}
+
+size_t
 mallctl_int64(const char* name, size_t* newval) {
 	size_t v = 0;
 	size_t len = sizeof(v);
@@ -144,7 +161,7 @@ mallctl_int64(const char* name, size_t* newval) {
 	return v;
 }
 
-int 
+int
 mallctl_opt(const char* name, int* newval) {
 	int v = 0;
 	size_t len = sizeof(v);
@@ -202,26 +219,53 @@ skynet_memalign(size_t alignment, size_t size) {
 	return fill_prefix(ptr);
 }
 
+void *
+skynet_aligned_alloc(size_t alignment, size_t size) {
+	void* ptr = je_aligned_alloc(alignment, size + (size_t)((PREFIX_SIZE + alignment -1) & ~(alignment-1)));
+	if(!ptr) malloc_oom(size);
+	return fill_prefix(ptr);
+}
+
+int
+skynet_posix_memalign(void **memptr, size_t alignment, size_t size) {
+	int err = je_posix_memalign(memptr, alignment, size + PREFIX_SIZE);
+	if (err) malloc_oom(size);
+	fill_prefix(*memptr);
+	return err;
+}
+
 #else
 
 // for skynet_lalloc use
 #define raw_realloc realloc
 #define raw_free free
 
-void 
-memory_info_dump(void) {
+void
+memory_info_dump(const char* opts) {
 	skynet_error(NULL, "No jemalloc");
 }
 
-size_t 
+size_t
 mallctl_int64(const char* name, size_t* newval) {
 	skynet_error(NULL, "No jemalloc : mallctl_int64 %s.", name);
 	return 0;
 }
 
-int 
+int
 mallctl_opt(const char* name, int* newval) {
 	skynet_error(NULL, "No jemalloc : mallctl_opt %s.", name);
+	return 0;
+}
+
+bool
+mallctl_bool(const char* name, bool* newval) {
+	skynet_error(NULL, "No jemalloc : mallctl_bool %s.", name);
+	return 0;
+}
+
+int
+mallctl_cmd(const char* name) {
+	skynet_error(NULL, "No jemalloc : mallctl_cmd %s.", name);
 	return 0;
 }
 
@@ -229,12 +273,12 @@ mallctl_opt(const char* name, int* newval) {
 
 size_t
 malloc_used_memory(void) {
-	return _used_memory;
+	return ATOM_LOAD(&_used_memory);
 }
 
 size_t
 malloc_memory_block(void) {
-	return _memory_block;
+	return ATOM_LOAD(&_memory_block);
 }
 
 void
@@ -246,7 +290,7 @@ dump_c_mem() {
 		struct mem_data* data = &mem_stats[i];
 		if(data->handle != 0 && data->allocated != 0) {
 			total += data->allocated;
-			skynet_error(NULL, "0x%x -> %zdkb", data->handle, data->allocated >> 10);
+			skynet_error(NULL, ":%08x -> %zdkb %db", data->handle, data->allocated >> 10, (int)(data->allocated % 1024));
 		}
 	}
 	skynet_error(NULL, "+total: %zdkb",total >> 10);
@@ -260,7 +304,7 @@ skynet_strdup(const char *str) {
 	return ret;
 }
 
-void * 
+void *
 skynet_lalloc(void *ptr, size_t osize, size_t nsize) {
 	if (nsize == 0) {
 		raw_free(ptr);
